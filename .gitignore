@@ -48,3 +48,7 @@ orchestrator/.env
 
 # ngrok config (contains auth token)
 ngrok.yml
+
+# Local setup files (not for GitHub)
+SETUP.md
+start.bat

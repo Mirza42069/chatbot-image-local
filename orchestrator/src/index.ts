@@ -1,202 +1,41 @@
 import express from "express";
-import multer from "multer";
 import cors from "cors";
-import { v4 as uuid } from "uuid";
+import multer from "multer";
 import fs from "fs";
 import path from "path";
-import WebSocket from "ws";
 
 const app = express();
-
-// === CONFIG (from environment) ===
-const PORT = parseInt(process.env.PORT || "3001");
+const PORT = process.env.PORT || 3001;
 const FAMILY_PIN = process.env.FAMILY_PIN || "1234";
-const COMFYUI_URL = process.env.COMFYUI_URL || "http://127.0.0.1:8188";
-const TEMP_DIR = path.join(process.cwd(), "temp");
+const A1111_URL = process.env.A1111_URL || "http://127.0.0.1:7860";
 
-// Ensure temp directory exists
-if (!fs.existsSync(TEMP_DIR)) {
-    fs.mkdirSync(TEMP_DIR, { recursive: true });
-}
-
-// === MIDDLEWARE ===
+// Middleware
 app.use(cors());
 app.use(express.json());
 
 // Multer for file uploads
 const upload = multer({
-    dest: TEMP_DIR,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
-    fileFilter: (_req, file, cb) => {
-        if (file.mimetype.startsWith("image/")) {
-            cb(null, true);
-        } else {
-            cb(new Error("Only images allowed"));
-        }
-    },
+    dest: path.join(__dirname, "../temp"),
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
 });
 
-// PIN authentication middleware
-const authMiddleware = (
-    req: express.Request,
-    res: express.Response,
-    next: express.NextFunction
-) => {
-    const pin = req.headers["x-family-pin"] as string;
-    if (pin !== FAMILY_PIN) {
-        res.status(401).json({ error: "Invalid PIN" });
-        return;
-    }
-    next();
-};
-
-// === PROMPT TEMPLATES ===
-const PROMPTS = {
+// Style prompts for different transformations
+const STYLE_PROMPTS: Record<string, { positive: string; negative: string }> = {
     anime: {
         positive:
-            "masterpiece, best quality, anime style, vibrant colors, detailed eyes, beautiful lighting, sharp focus",
+            "anime style, high quality anime artwork, studio ghibli style, detailed anime face, vibrant colors, beautiful lighting, masterpiece, best quality, detailed eyes, smooth skin",
         negative:
-            "lowres, bad anatomy, bad hands, text, error, missing fingers, cropped, worst quality, low quality, jpeg artifacts, ugly, duplicate, blurry, realistic, photo",
+            "photo, realistic, 3d render, ugly, deformed, blurry, low quality, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, username, watermark, signature",
     },
     cartoon: {
         positive:
-            "cartoon style, pixar style, 3d render, vibrant colors, smooth shading, professional lighting, high quality",
+            "pixar style, 3d cartoon, disney style, high quality 3d render, colorful, smooth shading, expressive face, vibrant colors, professional 3d art, octane render, masterpiece, best quality",
         negative:
-            "lowres, bad anatomy, text, error, cropped, worst quality, low quality, jpeg artifacts, ugly, blurry, realistic, anime",
+            "anime, realistic photo, ugly, deformed, blurry, low quality, bad anatomy, bad proportions, extra limbs, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, username, watermark, signature, 2d, flat",
     },
-} as const;
+};
 
-type Style = keyof typeof PROMPTS;
-
-// === COMFYUI WORKFLOW ===
-function createWorkflow(inputImagePath: string, style: Style): object {
-    const prompts = PROMPTS[style] || PROMPTS.anime;
-
-    return {
-        "1": {
-            class_type: "LoadImage",
-            inputs: { image: inputImagePath },
-        },
-        "2": {
-            class_type: "CheckpointLoaderSimple",
-            inputs: { ckpt_name: "toonyou_beta6.safetensors" },
-        },
-        "3": {
-            class_type: "VAEEncode",
-            inputs: { pixels: ["1", 0], vae: ["2", 2] },
-        },
-        "4": {
-            class_type: "CLIPTextEncode",
-            inputs: { text: prompts.positive, clip: ["2", 1] },
-        },
-        "5": {
-            class_type: "CLIPTextEncode",
-            inputs: { text: prompts.negative, clip: ["2", 1] },
-        },
-        "6": {
-            class_type: "KSampler",
-            inputs: {
-                seed: Math.floor(Math.random() * 1000000000),
-                steps: 20,
-                cfg: 7,
-                sampler_name: "euler_ancestral",
-                scheduler: "normal",
-                denoise: 0.6,
-                model: ["2", 0],
-                positive: ["4", 0],
-                negative: ["5", 0],
-                latent_image: ["3", 0],
-            },
-        },
-        "7": {
-            class_type: "VAEDecode",
-            inputs: { samples: ["6", 0], vae: ["2", 2] },
-        },
-        "8": {
-            class_type: "SaveImage",
-            inputs: { filename_prefix: "output", images: ["7", 0] },
-        },
-    };
-}
-
-// === COMFYUI API ===
-async function queueWorkflow(workflow: object): Promise<string> {
-    const clientId = uuid();
-
-    const response = await fetch(`${COMFYUI_URL}/prompt`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: workflow, client_id: clientId }),
-    });
-
-    if (!response.ok) {
-        throw new Error(`ComfyUI error: ${response.statusText}`);
-    }
-
-    const data = (await response.json()) as { prompt_id: string };
-    return data.prompt_id;
-}
-
-async function waitForCompletion(promptId: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const ws = new WebSocket(`ws://127.0.0.1:8188/ws`);
-        const timeout = setTimeout(() => {
-            ws.close();
-            reject(new Error("Timeout waiting for ComfyUI"));
-        }, 120000); // 2 minute timeout
-
-        ws.on("message", async (data) => {
-            try {
-                const message = JSON.parse(data.toString());
-                if (message.type === "executed" && message.data.prompt_id === promptId) {
-                    clearTimeout(timeout);
-                    ws.close();
-
-                    // Get the output image
-                    const historyRes = await fetch(`${COMFYUI_URL}/history/${promptId}`);
-                    const history = (await historyRes.json()) as Record<string, any>;
-                    const outputs = history[promptId]?.outputs;
-
-                    if (outputs?.["8"]?.images?.[0]) {
-                        const img = outputs["8"].images[0];
-                        resolve(
-                            `${COMFYUI_URL}/view?filename=${img.filename}&subfolder=${img.subfolder || ""}&type=${img.type}`
-                        );
-                    } else {
-                        reject(new Error("No output image"));
-                    }
-                }
-            } catch {
-                // Ignore parse errors
-            }
-        });
-
-        ws.on("error", (err) => {
-            clearTimeout(timeout);
-            reject(err);
-        });
-    });
-}
-
-// Helper: cleanup temp file
-function cleanupFile(filePath: string) {
-    try {
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
-    } catch {
-        // Ignore cleanup errors
-    }
-}
-
-// === ROUTES ===
-
-// Health check
-app.get("/", (_req, res) => {
-    res.json({ status: "ok", message: "Photo Transformer API" });
-});
-
-// Verify PIN
+// Auth endpoint
 app.post("/auth", (req, res) => {
     const { pin } = req.body;
     if (pin === FAMILY_PIN) {
@@ -206,50 +45,96 @@ app.post("/auth", (req, res) => {
     }
 });
 
-// Generate cartoon
-app.post("/generate", authMiddleware, upload.single("image"), async (req, res) => {
-    const file = req.file;
-    const style = (req.body.style as Style) || "anime";
-
-    if (!file) {
-        res.status(400).json({ error: "No image uploaded" });
-        return;
-    }
-
-    // Rename file with extension for ComfyUI compatibility
-    const ext = path.extname(file.originalname) || ".jpg";
-    const newPath = file.path + ext;
-    fs.renameSync(file.path, newPath);
-
+// Health check
+app.get("/health", async (req, res) => {
     try {
-        // Create and queue workflow
-        const workflow = createWorkflow(newPath, style);
-        const promptId = await queueWorkflow(workflow);
-
-        // Wait for completion
-        const imageUrl = await waitForCompletion(promptId);
-
-        // Fetch the image from ComfyUI
-        const imageRes = await fetch(imageUrl);
-        const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
-
-        // Send image with no-cache headers
-        res.setHeader("Content-Type", "image/png");
-        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
-        res.setHeader("Pragma", "no-cache");
-        res.send(imageBuffer);
-    } catch (error) {
-        console.error("Generation error:", (error as Error).message);
-        res.status(500).json({ error: "Generation failed" });
-    } finally {
-        // Always cleanup temp file
-        cleanupFile(newPath);
+        const response = await fetch(`${A1111_URL}/sdapi/v1/sd-models`);
+        if (response.ok) {
+            res.json({ status: "ok", a1111: "connected" });
+        } else {
+            res.status(503).json({ status: "error", a1111: "not responding" });
+        }
+    } catch {
+        res.status(503).json({ status: "error", a1111: "not connected" });
     }
 });
 
-// === START SERVER ===
+// Generate endpoint
+app.post("/generate", upload.single("image"), async (req, res) => {
+    const pin = req.headers["x-family-pin"];
+    if (pin !== FAMILY_PIN) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    if (!req.file) {
+        return res.status(400).json({ error: "No image provided" });
+    }
+
+    const style = (req.body.style as string) || "anime";
+    const stylePrompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.anime;
+
+    try {
+        // Read the uploaded file and convert to base64
+        const imageBuffer = fs.readFileSync(req.file.path);
+        const base64Image = imageBuffer.toString("base64");
+
+        // Call A1111 img2img API
+        const a1111Response = await fetch(`${A1111_URL}/sdapi/v1/img2img`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                init_images: [base64Image],
+                prompt: stylePrompt.positive,
+                negative_prompt: stylePrompt.negative,
+                steps: 30,
+                cfg_scale: 7,
+                width: 512,
+                height: 512,
+                denoising_strength: 0.6,
+                sampler_name: "DPM++ 2M Karras",
+                batch_size: 1,
+                n_iter: 1,
+            }),
+        });
+
+        if (!a1111Response.ok) {
+            const errorText = await a1111Response.text();
+            console.error("A1111 error:", errorText);
+            throw new Error(`A1111 returned ${a1111Response.status}`);
+        }
+
+        const result = (await a1111Response.json()) as { images: string[] };
+
+        // Clean up temp file
+        fs.unlinkSync(req.file.path);
+
+        if (!result.images || result.images.length === 0) {
+            throw new Error("No image generated");
+        }
+
+        // Return the generated image as binary
+        const generatedImage = Buffer.from(result.images[0], "base64");
+        res.set("Content-Type", "image/png");
+        res.send(generatedImage);
+    } catch (error) {
+        console.error("Generation error:", error);
+
+        // Clean up temp file on error
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+
+        res.status(500).json({
+            error: "Generation failed. Is Automatic1111 running with --api flag?",
+        });
+    }
+});
+
+// Start server
 app.listen(PORT, () => {
-    console.log(`🎨 Photo Transformer API running on http://localhost:${PORT}`);
-    console.log(`🔗 ComfyUI: ${COMFYUI_URL}`);
-    // Don't log PIN for security
+    console.log(`🚀 Orchestrator running on http://localhost:${PORT}`);
+    console.log(`📡 Connecting to A1111 at ${A1111_URL}`);
+    console.log(`🔐 Family PIN: ${FAMILY_PIN.substring(0, 2)}***`);
 });

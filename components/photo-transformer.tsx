@@ -100,7 +100,7 @@ export function PhotoTransformer() {
             setResultUrl(url);
             setStep("result");
         } catch (err) {
-            setError("Failed to generate. Is ComfyUI running?");
+            setError("Failed to generate. Is Automatic1111 running with --api flag?");
             setStep("upload");
         } finally {
             setIsLoading(false);
@@ -274,8 +274,8 @@ export function PhotoTransformer() {
                     <button
                         onClick={() => setStyle("anime")}
                         className={`p-4 rounded-lg border-2 text-left transition-all ${style === "anime"
-                                ? "border-primary bg-primary/5"
-                                : "border-muted hover:border-muted-foreground/30"
+                            ? "border-primary bg-primary/5"
+                            : "border-muted hover:border-muted-foreground/30"
                             }`}
                     >
                         <span className="text-2xl mb-1 block">🎨</span>
@@ -287,8 +287,8 @@ export function PhotoTransformer() {
                     <button
                         onClick={() => setStyle("cartoon")}
                         className={`p-4 rounded-lg border-2 text-left transition-all ${style === "cartoon"
-                                ? "border-primary bg-primary/5"
-                                : "border-muted hover:border-muted-foreground/30"
+                            ? "border-primary bg-primary/5"
+                            : "border-muted hover:border-muted-foreground/30"
                             }`}
                     >
                         <span className="text-2xl mb-1 block">✨</span>
