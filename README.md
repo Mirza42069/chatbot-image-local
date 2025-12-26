@@ -1,36 +1,92 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Photo to Cartoon
 
-## Getting Started
+Transform family photos into anime/cartoon art using local AI inference.
 
-First, run the development server:
+## Features
+
+- 🔒 PIN-protected family access
+- 🎨 Two styles: Anime & Cartoon (Pixar-style)
+- 🖼️ Local AI processing with ComfyUI + ToonYou
+- 🚫 No cloud storage - images deleted immediately
+- 📱 Mobile-friendly UI
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+
+- [ComfyUI Portable](https://github.com/comfyanonymous/ComfyUI/releases) (Windows)
+- [ToonYou Beta 6](https://civitai.com/models/30240) model
+- [ngrok](https://ngrok.com/) (for remote access)
+
+### 1. Setup ComfyUI
+
+1. Extract ComfyUI to `E:\ComfyUI_windows_portable`
+2. Place model in `ComfyUI\models\checkpoints\toonyou_beta6.safetensors`
+
+### 2. Configure Environment
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Frontend (.env.local)
+cp .env.example .env.local
+# Edit: NEXT_PUBLIC_API_URL=http://localhost:3001
+
+# Orchestrator (orchestrator/.env)
+cp orchestrator/.env.example orchestrator/.env
+# Edit: FAMILY_PIN=your-secure-pin
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 3. Install & Run
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+# Terminal 1: ComfyUI
+cd E:\ComfyUI_windows_portable
+.\run_nvidia_gpu.bat
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+# Terminal 2: Orchestrator
+cd orchestrator
+npm install
+npm run dev
 
-## Learn More
+# Terminal 3: Frontend
+bun install
+bun run dev
 
-To learn more about Next.js, take a look at the following resources:
+# Terminal 4 (optional): ngrok for remote access
+ngrok http 3001
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 4. Access
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- **Local:** http://localhost:3000
+- **Phone (same WiFi):** http://YOUR_LAPTOP_IP:3000
+- **Remote:** Update `.env.local` with ngrok URL
 
-## Deploy on Vercel
+## Project Structure
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+├── app/                  # Next.js pages
+├── components/           # React components
+│   └── photo-transformer.tsx
+├── orchestrator/         # Backend API
+│   └── src/index.ts
+├── .env.example          # Frontend env template
+└── orchestrator/.env.example  # API env template
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Security
+
+- PIN authentication for family access
+- No images stored on server
+- Temp files deleted after processing
+- No logging of images or prompts
+
+## Tech Stack
+
+- **Frontend:** Next.js 16, TypeScript, Tailwind, shadcn/ui
+- **Backend:** Node.js, Express, TypeScript
+- **AI:** ComfyUI, Stable Diffusion 1.5 (ToonYou)
+
+## License
+
+MIT
