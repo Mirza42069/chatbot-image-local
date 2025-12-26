@@ -100,7 +100,7 @@ export function PhotoTransformer() {
             setResultUrl(url);
             setStep("result");
         } catch (err) {
-            setError("Failed to generate. Is Automatic1111 running with --api flag?");
+            setError("Failed to generate. Please try again.");
             setStep("upload");
         } finally {
             setIsLoading(false);

@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -7,7 +8,7 @@ import path from "path";
 const app = express();
 const PORT = process.env.PORT || 3001;
 const FAMILY_PIN = process.env.FAMILY_PIN || "1234";
-const A1111_URL = process.env.A1111_URL || "http://127.0.0.1:7860";
+const HF_TOKEN = process.env.HF_TOKEN || "";
 
 // Middleware
 app.use(cors());
@@ -19,20 +20,10 @@ const upload = multer({
     limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
 });
 
-// Style prompts for different transformations
-const STYLE_PROMPTS: Record<string, { positive: string; negative: string }> = {
-    anime: {
-        positive:
-            "anime style, high quality anime artwork, studio ghibli style, detailed anime face, vibrant colors, beautiful lighting, masterpiece, best quality, detailed eyes, smooth skin",
-        negative:
-            "photo, realistic, 3d render, ugly, deformed, blurry, low quality, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, username, watermark, signature",
-    },
-    cartoon: {
-        positive:
-            "pixar style, 3d cartoon, disney style, high quality 3d render, colorful, smooth shading, expressive face, vibrant colors, professional 3d art, octane render, masterpiece, best quality",
-        negative:
-            "anime, realistic photo, ugly, deformed, blurry, low quality, bad anatomy, bad proportions, extra limbs, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, username, watermark, signature, 2d, flat",
-    },
+// Style prompts for image editing
+const STYLE_PROMPTS: Record<string, string> = {
+    anime: "Transform this photo into anime style artwork, detailed anime face, vibrant colors, studio ghibli aesthetic, masterpiece quality",
+    cartoon: "Transform this photo into 3D Pixar style cartoon, Disney style character, colorful, smooth shading, expressive face, professional 3d render",
 };
 
 // Auth endpoint
@@ -46,20 +37,11 @@ app.post("/auth", (req, res) => {
 });
 
 // Health check
-app.get("/health", async (req, res) => {
-    try {
-        const response = await fetch(`${A1111_URL}/sdapi/v1/sd-models`);
-        if (response.ok) {
-            res.json({ status: "ok", a1111: "connected" });
-        } else {
-            res.status(503).json({ status: "error", a1111: "not responding" });
-        }
-    } catch {
-        res.status(503).json({ status: "error", a1111: "not connected" });
-    }
+app.get("/health", (req, res) => {
+    res.json({ status: "ok", backend: "huggingface", model: "Qwen/Qwen-Image-Edit" });
 });
 
-// Generate endpoint
+// Generate endpoint using Qwen-Image-Edit
 app.post("/generate", upload.single("image"), async (req, res) => {
     const pin = req.headers["x-family-pin"];
     if (pin !== FAMILY_PIN) {
@@ -71,53 +53,76 @@ app.post("/generate", upload.single("image"), async (req, res) => {
     }
 
     const style = (req.body.style as string) || "anime";
-    const stylePrompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.anime;
+    const prompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.anime;
 
     try {
         // Read the uploaded file and convert to base64
         const imageBuffer = fs.readFileSync(req.file.path);
         const base64Image = imageBuffer.toString("base64");
 
-        // Call A1111 img2img API
-        const a1111Response = await fetch(`${A1111_URL}/sdapi/v1/img2img`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                init_images: [base64Image],
-                prompt: stylePrompt.positive,
-                negative_prompt: stylePrompt.negative,
-                steps: 30,
-                cfg_scale: 7,
-                width: 512,
-                height: 512,
-                denoising_strength: 0.6,
-                sampler_name: "DPM++ 2M Karras",
-                batch_size: 1,
-                n_iter: 1,
-            }),
-        });
+        // Use Qwen-Image-Edit model via HuggingFace
+        const response = await fetch(
+            "https://router.huggingface.co/hf-inference/models/Qwen/Qwen2.5-VL-72B-Instruct",
+            {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${HF_TOKEN}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    inputs: {
+                        image: base64Image,
+                        text: prompt,
+                    },
+                }),
+            }
+        );
 
-        if (!a1111Response.ok) {
-            const errorText = await a1111Response.text();
-            console.error("A1111 error:", errorText);
-            throw new Error(`A1111 returned ${a1111Response.status}`);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error("HuggingFace error:", errorText);
+
+            if (response.status === 503) {
+                return res.status(503).json({
+                    error: "Model is loading. Please try again in 30 seconds."
+                });
+            }
+
+            // Try fallback to FLUX for text-to-image
+            console.log("Trying fallback to FLUX model...");
+            const fallbackResponse = await fetch(
+                "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
+                {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${HF_TOKEN}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        inputs: prompt + ", portrait, high quality",
+                    }),
+                }
+            );
+
+            if (!fallbackResponse.ok) {
+                const fallbackError = await fallbackResponse.text();
+                console.error("Fallback error:", fallbackError);
+                throw new Error(`Generation failed: ${fallbackError}`);
+            }
+
+            fs.unlinkSync(req.file.path);
+            const fallbackImage = await fallbackResponse.arrayBuffer();
+            res.set("Content-Type", "image/png");
+            return res.send(Buffer.from(fallbackImage));
         }
-
-        const result = (await a1111Response.json()) as { images: string[] };
 
         // Clean up temp file
         fs.unlinkSync(req.file.path);
 
-        if (!result.images || result.images.length === 0) {
-            throw new Error("No image generated");
-        }
-
-        // Return the generated image as binary
-        const generatedImage = Buffer.from(result.images[0], "base64");
+        // Return the generated image
+        const imageBlob = await response.arrayBuffer();
         res.set("Content-Type", "image/png");
-        res.send(generatedImage);
+        res.send(Buffer.from(imageBlob));
     } catch (error) {
         console.error("Generation error:", error);
 
@@ -127,7 +132,7 @@ app.post("/generate", upload.single("image"), async (req, res) => {
         }
 
         res.status(500).json({
-            error: "Generation failed. Is Automatic1111 running with --api flag?",
+            error: "Generation failed. Please try again.",
         });
     }
 });
@@ -135,6 +140,7 @@ app.post("/generate", upload.single("image"), async (req, res) => {
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 Orchestrator running on http://localhost:${PORT}`);
-    console.log(`📡 Connecting to A1111 at ${A1111_URL}`);
+    console.log(`🤗 Using HuggingFace API (Qwen-Image-Edit + FLUX fallback)`);
     console.log(`🔐 Family PIN: ${FAMILY_PIN.substring(0, 2)}***`);
+    console.log(`🔑 HF Token: ${HF_TOKEN ? "configured" : "MISSING!"}`);
 });
